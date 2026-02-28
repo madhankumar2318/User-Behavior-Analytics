@@ -32,11 +32,14 @@ from error_handlers import register_error_handlers
 # Import Alert & Notification components
 from team_notifications import team_notification_service as team_notifier
 
+
 class MockAlertService:
     def send_high_risk_alert(self, user_id, risk_score, email):
         pass
+
     def send_email_alert(self, *args, **kwargs):
         return True
+
 
 alert_service = MockAlertService()
 
