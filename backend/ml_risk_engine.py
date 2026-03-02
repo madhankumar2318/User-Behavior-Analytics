@@ -6,6 +6,7 @@ Uses Isolation Forest for anomaly detection in user behavior
 from sklearn.ensemble import IsolationForest
 import numpy as np
 import joblib
+import json
 import os
 from datetime import datetime
 
@@ -42,10 +43,24 @@ class MLRiskEngine:
         else:
             print("ℹ️ No pre-trained model found. Will train on first use.")
 
+        # Load location encoder if available
+        encoder_path = self.model_path + ".locations.json"
+        if os.path.exists(encoder_path):
+            try:
+                with open(encoder_path, "r") as f:
+                    self.location_encoder = json.load(f)
+                print(f"✅ Location encoder loaded ({len(self.location_encoder)} cities)")
+            except Exception as e:
+                print(f"⚠️ Could not load location encoder: {e}")
+
     def save_model(self):
-        """Save trained model to disk"""
+        """Save trained model and location encoder to disk"""
         try:
             joblib.dump(self.model, self.model_path)
+            # Also save location encoder so it survives restarts
+            encoder_path = self.model_path + ".locations.json"
+            with open(encoder_path, "w") as f:
+                json.dump(self.location_encoder, f)
             print(f"✅ Model saved to {self.model_path}")
         except Exception as e:
             print(f"❌ Error saving model: {e}")

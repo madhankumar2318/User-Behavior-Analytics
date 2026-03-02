@@ -31,22 +31,34 @@ from error_handlers import register_error_handlers
 
 # Import Alert & Notification components
 from team_notifications import team_notification_service as team_notifier
-
-
-class MockAlertService:
-    def send_high_risk_alert(self, user_id, risk_score, email):
-        pass
-
-    def send_email_alert(self, *args, **kwargs):
-        return True
-
-
-alert_service = MockAlertService()
+from email_service import alert_service
 
 load_dotenv()
 
+# -------------------------
+# JWT Token Revocation Blocklist (in-memory; survives process lifetime)
+# -------------------------
+_token_blocklist = set()
+
+
+def revoke_token(token):
+    """Add a token to the revocation blocklist."""
+    _token_blocklist.add(token)
+
+
+def is_token_revoked(token):
+    """Check whether a token has been revoked."""
+    return token in _token_blocklist
+
+
 app = Flask(__name__)
-CORS(app)
+
+# -------------------------
+# CORS — restrict to configured origins (defaults to localhost dev)
+# -------------------------
+_cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+CORS(app, origins=_cors_origins, supports_credentials=True)
 
 # Initialize Swagger API Documentation
 swagger = init_swagger(app)
@@ -54,7 +66,7 @@ swagger = init_swagger(app)
 # Register error handlers
 register_error_handlers(app)
 
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins=_cors_origins)
 
 # Initialize ML components on startup
 ml_initialized = False
@@ -196,12 +208,38 @@ def login():
 @app.route("/auth/logout", methods=["POST"])
 @token_required
 def logout():
-    """User logout"""
+    """User logout — revokes the current JWT token"""
     try:
+        # Revoke the current token so it can no longer be used
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else auth_header
+        if token:
+            revoke_token(token)
+
         audit_logger.log_logout(request.user_id, request.username, request.remote_addr)
         return jsonify({"message": "Logged out successfully"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# -------------------------
+# Health Check (required for Docker healthchecks)
+# -------------------------
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for Docker/load-balancer probes"""
+    try:
+        # Quick DB ping
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        return jsonify({
+            "status": "ok",
+            "ml_ready": ml_engine.is_trained,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 503
 
 
 @app.route("/auth/me", methods=["GET"])
@@ -650,49 +688,39 @@ def get_logs():
 @token_required
 @role_required(["Admin", "Analyst"])
 def simulate_activity():
-    # Generate random user activity
+    """Simulate random user activity — uses the full ML + velocity + profile pipeline"""
     user_ids = [
-        "user_001",
-        "user_002",
-        "user_003",
-        "user_004",
-        "user_005",
-        "user_006",
-        "user_007",
-        "user_008",
-        "user_009",
-        "user_010",
+        "user_001", "user_002", "user_003", "user_004", "user_005",
+        "user_006", "user_007", "user_008", "user_009", "user_010",
     ]
     locations = [
-        "New York",
-        "London",
-        "Tokyo",
-        "Mumbai",
-        "Berlin",
-        "Singapore",
-        "Sydney",
-        "Toronto",
-        "Paris",
-        "Dubai",
+        "New York", "London", "Tokyo", "Mumbai", "Berlin",
+        "Singapore", "Sydney", "Toronto", "Paris", "Dubai",
     ]
 
-    # Random data generation
     user_id = random.choice(user_ids)
     login_time = f"{random.randint(0, 23):02d}:{random.randint(0, 59):02d}"
     location = random.choice(locations)
 
-    # Create different risk scenarios
     scenario = random.choice(["normal", "normal", "normal", "moderate", "high"])
-
     if scenario == "normal":
         downloads = random.randint(1, 10)
         failed_attempts = 0
     elif scenario == "moderate":
         downloads = random.randint(10, 20)
         failed_attempts = random.randint(1, 3)
-    else:  # high risk
+    else:
         downloads = random.randint(20, 50)
         failed_attempts = random.randint(3, 8)
+
+    ip_address = (
+        f"{random.randint(1,255)}.{random.randint(1,255)}"
+        f".{random.randint(1,255)}.{random.randint(1,255)}"
+    )
+    device_fingerprint = (
+        f"FP-{random.randint(10000,99999)}"
+        f"-{random.choice(['Chrome','Firefox','Safari','Edge'])}"
+    )
 
     data = {
         "user_id": user_id,
@@ -700,27 +728,22 @@ def simulate_activity():
         "location": location,
         "downloads": downloads,
         "failed_attempts": failed_attempts,
+        "ip_address": ip_address,
+        "device_fingerprint": device_fingerprint,
     }
-
-    # Generate random IP and device fingerprint
-    ip_address = f"{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}"
-    device_fingerprint = f"FP-{random.randint(10000, 99999)}-{random.choice(['Chrome', 'Firefox', 'Safari', 'Edge'])}"
 
     # Insert log
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO logs (user_id, login_time, location, downloads, failed_attempts, ip_address, device_fingerprint)
+        INSERT INTO logs (user_id, login_time, location, downloads, failed_attempts,
+                          ip_address, device_fingerprint)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """,
+        """,
         (
-            data["user_id"],
-            data["login_time"],
-            data["location"],
-            data["downloads"],
-            data["failed_attempts"],
-            ip_address,
-            device_fingerprint,
+            data["user_id"], data["login_time"], data["location"],
+            data["downloads"], data["failed_attempts"],
+            ip_address, device_fingerprint,
         ),
     )
     conn.commit()
@@ -733,27 +756,57 @@ def simulate_activity():
         (data["user_id"],),
     ).fetchall()
     conn.close()
-
     user_history = [dict(row) for row in history]
 
-    # Calculate AI Risk
-    risk_score, risk_reasons = calculate_risk(data, user_history)
+    # ===== FULL ML PIPELINE (same as /log-activity) =====
+    base_risk_score, base_risk_reasons = calculate_risk(data, user_history)
 
-    # Determine User Status
-    status = determine_status(risk_score)
+    ml_score, is_anomaly, ml_confidence = ml_engine.predict_anomaly(data)
+    ml_reasons = []
+    if is_anomaly:
+        ml_reasons.append(
+            f"🤖 ML: Anomalous behavior detected (score: {ml_score:.1f}, confidence: {ml_confidence:.1f}%)"
+        )
 
-    # ===== SEND EMAIL ALERTS FOR HIGH-RISK SIMULATED ACTIVITIES =====
+    velocity_result = velocity_checker.perform_all_checks(data, user_history)
+    velocity_reasons = velocity_result["alerts"]
+
+    profile_score, profile_reasons = profile_manager.calculate_deviation(
+        data["user_id"], data
+    )
+    profile_manager.update_profile(data["user_id"], user_history + [data])
+
+    velocity_boost = 0
+    if velocity_result["severity"] == "HIGH":
+        velocity_boost = 20
+    elif velocity_result["severity"] == "MEDIUM":
+        velocity_boost = 10
+
+    final_risk_score = min(
+        100,
+        base_risk_score * 0.4 + ml_score * 0.3 + profile_score * 0.2 + velocity_boost,
+    )
+    all_reasons = base_risk_reasons + ml_reasons + velocity_reasons + profile_reasons
+    status = determine_status(final_risk_score)
+
+    # Alerts
     try:
         if status in ["LOCKED", "HIGH_RISK"]:
             alert_email = os.getenv("ALERT_EMAIL")
-
             if alert_email:
                 alert_service.send_high_risk_alert(
-                    user_id=data["user_id"], risk_score=risk_score, email=alert_email
+                    user_id=data["user_id"],
+                    risk_score=round(final_risk_score, 2),
+                    email=alert_email,
                 )
-                print(
-                    f"🚨 Email alert sent for simulated activity: {data['user_id']} - Risk: {risk_score:.2f}"
-                )
+        if status == "LOCKED":
+            team_notifier.send_high_risk_alert(
+                user_id=data["user_id"],
+                risk_score=round(final_risk_score, 2),
+                location=data.get("location", "Unknown"),
+                slack=True,
+                teams=True,
+            )
     except Exception as e:
         print(f"⚠️ Alert sending failed: {e}")
 
@@ -766,9 +819,12 @@ def simulate_activity():
             "location": data["location"],
             "downloads": data["downloads"],
             "failed_attempts": data["failed_attempts"],
-            "risk_score": risk_score,
-            "risk_reasons": risk_reasons,
+            "risk_score": round(final_risk_score, 2),
+            "risk_reasons": all_reasons,
             "status": status,
+            "ml_anomaly": is_anomaly,
+            "ml_confidence": round(ml_confidence, 2),
+            "velocity_alerts": velocity_result["has_alerts"],
         },
     )
 
@@ -776,8 +832,14 @@ def simulate_activity():
         {
             "message": "Activity simulated successfully",
             "user_id": data["user_id"],
-            "risk_score": risk_score,
+            "risk_score": round(final_risk_score, 2),
             "status": status,
+            "ml_insights": {
+                "is_anomaly": is_anomaly,
+                "ml_score": round(ml_score, 2),
+                "confidence": round(ml_confidence, 2),
+            },
+            "velocity_insights": velocity_result,
         }
     )
 

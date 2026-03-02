@@ -171,8 +171,92 @@ class UserProfile:
 
 
 class ProfileManager:
+    """
+    Manages per-user behavioral profiles with SQLite persistence.
+    Profiles are loaded from DB on startup and saved after every update.
+    """
+
+    DB_PATH = "database.db"
+
     def __init__(self):
         self.profiles = {}  # user_id -> UserProfile
+        self._ensure_table()
+        self._load_from_db()
+
+    # ------------------------------------------------------------------
+    # DB helpers
+    # ------------------------------------------------------------------
+
+    def _get_conn(self):
+        import sqlite3
+
+        conn = sqlite3.connect(self.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_table(self):
+        """Create the user_profiles table if it doesn't exist."""
+        try:
+            conn = self._get_conn()
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    profile_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"\u26a0\ufe0f Could not ensure user_profiles table: {e}")
+
+    def _load_from_db(self):
+        """Load all profiles from the database into memory."""
+        try:
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT user_id, profile_json FROM user_profiles"
+            ).fetchall()
+            conn.close()
+            for row in rows:
+                data = json.loads(row["profile_json"])
+                profile = UserProfile(row["user_id"])
+                profile.from_dict(data)
+                self.profiles[row["user_id"]] = profile
+            if self.profiles:
+                print(f"\u2705 Loaded {len(self.profiles)} user profiles from DB")
+        except Exception as e:
+            print(f"\u26a0\ufe0f Could not load profiles from DB: {e}")
+
+    def _save_profile_to_db(self, user_id):
+        """Persist a single user profile to the database."""
+        try:
+            profile_data = self.profiles[user_id].to_dict()
+            conn = self._get_conn()
+            conn.execute(
+                """
+                INSERT INTO user_profiles (user_id, profile_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    profile_json = excluded.profile_json,
+                    updated_at   = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    json.dumps(profile_data),
+                    datetime.now().isoformat(),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"\u26a0\ufe0f Could not save profile for {user_id}: {e}")
+
+    # ------------------------------------------------------------------
+    # Public API (same interface as before)
+    # ------------------------------------------------------------------
 
     def get_profile(self, user_id):
         """Get or create user profile"""
@@ -181,9 +265,10 @@ class ProfileManager:
         return self.profiles[user_id]
 
     def update_profile(self, user_id, logs):
-        """Update user profile with new logs"""
+        """Update user profile with new logs and persist to DB"""
         profile = self.get_profile(user_id)
         profile.update_profile(logs)
+        self._save_profile_to_db(user_id)
         return profile
 
     def calculate_deviation(self, user_id, new_log):
@@ -195,32 +280,31 @@ class ProfileManager:
         """Get all user profiles"""
         return {uid: profile.to_dict() for uid, profile in self.profiles.items()}
 
+    # Keep legacy JSON methods for manual backup / migration
     def save_profiles(self, filepath="user_profiles.json"):
-        """Save all profiles to file"""
+        """Save all profiles to JSON file (backup)"""
         try:
             data = self.get_all_profiles()
             with open(filepath, "w") as f:
                 json.dump(data, f, indent=2)
-            print(f"✅ Saved {len(data)} profiles to {filepath}")
+            print(f"\u2705 Saved {len(data)} profiles to {filepath}")
         except Exception as e:
-            print(f"❌ Error saving profiles: {e}")
+            print(f"\u274c Error saving profiles: {e}")
 
     def load_profiles(self, filepath="user_profiles.json"):
-        """Load profiles from file"""
+        """Load profiles from JSON file"""
         try:
             with open(filepath, "r") as f:
                 data = json.load(f)
-
             for user_id, profile_data in data.items():
                 profile = UserProfile(user_id)
                 profile.from_dict(profile_data)
                 self.profiles[user_id] = profile
-
-            print(f"✅ Loaded {len(data)} profiles from {filepath}")
+            print(f"\u2705 Loaded {len(data)} profiles from {filepath}")
         except FileNotFoundError:
-            print(f"ℹ️ No profile file found at {filepath}")
+            print(f"\u2139\ufe0f No profile file found at {filepath}")
         except Exception as e:
-            print(f"❌ Error loading profiles: {e}")
+            print(f"\u274c Error loading profiles: {e}")
 
 
 # Global instance

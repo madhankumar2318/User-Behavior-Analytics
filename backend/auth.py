@@ -134,6 +134,15 @@ def token_required(f):
         if not token:
             return jsonify({"error": "Authentication token is missing"}), 401
 
+        # Check token revocation blocklist (lazy import to avoid circular deps)
+        try:
+            from app import is_token_revoked
+
+            if is_token_revoked(token):
+                return jsonify({"error": "Token has been revoked — please log in again"}), 401
+        except ImportError:
+            pass  # Running outside app context (e.g. tests)
+
         # Verify token
         payload = verify_token(token)
 

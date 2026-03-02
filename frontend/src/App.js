@@ -324,7 +324,7 @@ function App() {
     }]
   };
 
-  // Heatmap data - 24-hour activity grid
+  // Heatmap data — 24-hour activity grid derived from real log data
   const generateHeatmapData = () => {
     const hours = Array.from({ length: 24 }, (_, i) => i);
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -332,11 +332,27 @@ function App() {
     // Initialize grid
     const grid = days.map(() => hours.map(() => 0));
 
-    // Process logs
-    logs.forEach(log => {
-      const hour = parseInt(log.login_time.split(':')[0]);
-      // Distribute across days randomly for demo (in real app, you'd use actual dates)
-      const dayIndex = Math.floor(Math.random() * 7);
+    // Process logs: try to extract real weekday from login_time.
+    // If login_time is a full ISO datetime string (e.g. "2025-01-15T09:30:00"),
+    // use getDay(); otherwise fall back to a stable index derived from the log id.
+    logs.forEach((log, idx) => {
+      const timeStr = log.login_time || '';
+      let hour = 0;
+      let dayIndex = idx % 7; // stable deterministic fallback
+
+      // Try full ISO parsing first
+      const parsed = new Date(timeStr);
+      if (!isNaN(parsed.getTime()) && timeStr.includes('-')) {
+        hour = parsed.getHours();
+        // getDay() returns 0=Sunday; shift so 0=Monday
+        dayIndex = (parsed.getDay() + 6) % 7;
+      } else {
+        // HH:MM only — extract hour, keep deterministic day fallback
+        const parts = timeStr.split(':');
+        hour = parts.length > 0 ? parseInt(parts[0], 10) : 0;
+        if (isNaN(hour) || hour < 0 || hour > 23) hour = 0;
+      }
+
       if (hour >= 0 && hour < 24) {
         grid[dayIndex][hour]++;
       }
